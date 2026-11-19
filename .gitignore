@@ -6,3 +6,8 @@ ROUNDS_RWF_Portable/BepInEx/DumpedAssemblies/
 # ビルド出力・配布用 zip (どちらも作り直せる)
 RoundsJPSettings/bin/
 *.zip
+
+# デバイスごとの mod 設定 (初回起動時に標準値で自動生成される)
+# BepInEx.cfg は HideManagerGameObject=true が必須なのでリポジトリに残す
+ROUNDS_RWF_Portable/BepInEx/config/*
+!ROUNDS_RWF_Portable/BepInEx/config/BepInEx.cfg

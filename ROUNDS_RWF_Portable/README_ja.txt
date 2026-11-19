@@ -63,6 +63,7 @@ Linux:   bash uninstall.sh を実行して、Steam の起動オプションも�
 ■ RoundsJPSettings でできること
 メインメニュー →「MOD」→「RWF 日本語オプション」で変えられます。
 BepInEx\config\local.rounds.jpsettings.cfg を直接書き換えても OK です。
+（このファイルは初めて起動したときに標準値で作られます。設定はパソコンごとに別々です）
 
   設定                          範囲      標準
   1回に取れるカードの数          0〜5      1   （0 でピックなし）
