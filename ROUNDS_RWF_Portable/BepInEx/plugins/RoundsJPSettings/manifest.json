@@ -1,0 +1,7 @@
+{
+    "name": "RoundsJPSettings",
+    "version_number": "1.0.0",
+    "website_url": "",
+    "description": "Pick/Draw N cards, points/rounds to win, Japanese UI for RWF on ROUNDS v1.1.2",
+    "dependencies": [ ]
+}

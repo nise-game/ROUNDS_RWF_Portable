@@ -1,0 +1,8 @@
+# BepInEx が起動ごとに作るもの (ログには Steam のセッション情報が含まれるので絶対に上げない)
+ROUNDS_RWF_Portable/BepInEx/LogOutput.log
+ROUNDS_RWF_Portable/BepInEx/cache/
+ROUNDS_RWF_Portable/BepInEx/DumpedAssemblies/
+
+# ビルド出力・配布用 zip (どちらも作り直せる)
+RoundsJPSettings/bin/
+*.zip
