@@ -55,6 +55,9 @@ namespace RoundsJPSettings
         internal static int draws = 5;
         internal static int points = 2;
         internal static int rounds = 5;
+        internal static bool fixedSides = false;
+
+        internal static ConfigEntry<bool> LobbyPanelConfig;
 
         private void Awake()
         {
@@ -66,6 +69,7 @@ namespace RoundsJPSettings
             RoundsConfig = Config.Bind("Game", "RoundsToWinGame", 5, "試合に勝つのに必要なラウンド数 (1-20, 標準 5。RWF デスマッチの標準は 3)");
             FixedSidesConfig = Config.Bind("Game", "FixedSides", false, "毎ラウンドの開始サイドを固定する (チーム番号の小さい順に左から。RWF は標準ではランダム)");
             TranslateConfig = Config.Bind("Language", "TranslateToJapanese", true, "RWF / UnboundLib の英語表示を日本語にする");
+            LobbyPanelConfig = Config.Bind("Lobby", "ShowRulesPanel", true, "ロビー (試合開始前) にルールパネルを出す。ホストはここで設定を変えられる");
 
             LoadLocalValues();
 
@@ -88,14 +92,21 @@ namespace RoundsJPSettings
         {
             JP.RetryPending();
             MainMenuOrder.Fix();
+            LobbyPanel.Tick();
         }
 
         internal static void LoadLocalValues()
         {
+            // オンラインでホスト以外のときは、ホストから届いた値を自分の設定で上書きしない
+            if (!IsHostOrOffline())
+            {
+                return;
+            }
             picks = Mathf.Clamp(PicksConfig.Value, 0, MaxPicks);
             draws = Mathf.Clamp(DrawsConfig.Value, 1, MaxDraws);
             points = Mathf.Clamp(PointsConfig.Value, 1, 10);
             rounds = Mathf.Clamp(RoundsConfig.Value, 1, 20);
+            fixedSides = FixedSidesConfig.Value;
         }
 
         internal static bool IsHostOrOffline()
@@ -113,17 +124,18 @@ namespace RoundsJPSettings
         {
             if (PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode && PhotonNetwork.IsMasterClient)
             {
-                NetworkingManager.RPC_Others(typeof(Plugin), "SyncSettings", new object[] { picks, draws, points, rounds });
+                NetworkingManager.RPC_Others(typeof(Plugin), "SyncSettings", new object[] { picks, draws, points, rounds, fixedSides ? 1 : 0 });
             }
         }
 
         [UnboundRPC]
-        private static void SyncSettings(int hostPicks, int hostDraws, int hostPoints, int hostRounds)
+        private static void SyncSettings(int hostPicks, int hostDraws, int hostPoints, int hostRounds, int hostFixedSides)
         {
             picks = hostPicks;
             draws = hostDraws;
             points = hostPoints;
             rounds = hostRounds;
+            fixedSides = hostFixedSides != 0;
         }
 
         // ---------- ラウンド/ポイント ----------
@@ -181,7 +193,7 @@ namespace RoundsJPSettings
             }, out slider, true);
 
             MenuHandler.CreateText(" ", menu, out tmp, 20);
-            MenuHandler.CreateToggle(FixedSidesConfig.Value, "Fixed starting sides", menu, delegate (bool b) { FixedSidesConfig.Value = b; }, 30);
+            MenuHandler.CreateToggle(FixedSidesConfig.Value, "Fixed starting sides", menu, delegate (bool b) { FixedSidesConfig.Value = b; LoadLocalValues(); SendSettingsToOthers(); }, 30);
             MenuHandler.CreateToggle(TranslateConfig.Value, "Translate to Japanese", menu, delegate (bool b) { TranslateConfig.Value = b; }, 30);
         }
 
@@ -285,6 +297,247 @@ namespace RoundsJPSettings
     }
 
     // =====================================================================
+    //  ロビーのルールパネル
+    //  RWF のロビー (ローカル / オンライン共通の、キャラ選択・準備OK の画面) が開いている間、
+    //  画面右上に今のルールを出す。ホストは ◀ ▶ で変えられ、変えたら全員に送って準備OKを解除する。
+    //  ロビー画面の部品構成に依存しないよう、自分専用の Canvas に作る。
+    // =====================================================================
+    internal static class LobbyPanel
+    {
+        private class Row
+        {
+            public string label;
+            public Func<string> value;
+            public Action<int> change; // -1 / +1
+            public TextMeshProUGUI valueText;
+            public GameObject buttons;
+            public string shown;
+        }
+
+        private static GameObject canvasGo;
+        private static TextMeshProUGUI hostNote;
+        private static RectTransform panelRect;
+        private static readonly List<Row> rows = new List<Row>();
+        private static Type roomType;
+        private static bool roomTypeSearched = false;
+        private static float nextSync = 0f;
+        private static bool failed = false;
+
+        private static float nextLobbyCheck = 0f;
+        private static bool lobbyOpenCached = false;
+
+        // オンライン: RWF の PrivateRoomHandler / ローカル: ゲーム本体のキャラ選択 (CharacterSelectionInstance)
+        private static bool LobbyOpen()
+        {
+            if (Time.unscaledTime < nextLobbyCheck) return lobbyOpenCached;
+            nextLobbyCheck = Time.unscaledTime + 0.25f;
+            lobbyOpenCached = OnlineLobbyOpen() || LocalLobbyOpen();
+            return lobbyOpenCached;
+        }
+
+        private static bool OnlineLobbyOpen()
+        {
+            if (!roomTypeSearched)
+            {
+                roomTypeSearched = true;
+                roomType = AccessTools.TypeByName("RWF.PrivateRoomHandler");
+            }
+            if (roomType == null) return false;
+            object inst = AccessTools.Field(roomType, "instance").GetValue(null);
+            if (inst == null || (inst as UnityEngine.Object) == null) return false;
+            return (bool)AccessTools.Property(roomType, "IsOpen").GetValue(inst, null);
+        }
+
+        private static bool LocalLobbyOpen()
+        {
+            foreach (CharacterSelectionInstance c in UnityEngine.Object.FindObjectsOfType<CharacterSelectionInstance>())
+            {
+                if (c != null && c.isActiveAndEnabled) return true;
+            }
+            return false;
+        }
+
+        private static void UnreadyAll()
+        {
+            try
+            {
+                object inst = AccessTools.Field(roomType, "instance").GetValue(null);
+                if (inst != null) AccessTools.Method(roomType, "UnreadyAllPlayers").Invoke(inst, null);
+            }
+            catch (Exception) { }
+        }
+
+        internal static void Tick()
+        {
+            if (failed) return;
+            try
+            {
+                bool show = Plugin.LobbyPanelConfig.Value && LobbyOpen();
+                if (!show)
+                {
+                    if (canvasGo != null && canvasGo.activeSelf) canvasGo.SetActive(false);
+                    return;
+                }
+                if (canvasGo == null) Build();
+                if (!canvasGo.activeSelf) canvasGo.SetActive(true);
+
+                bool host = Plugin.IsHostOrOffline();
+                if (host) Plugin.LoadLocalValues();
+                foreach (Row r in rows)
+                {
+                    string v = r.value();
+                    if (v != r.shown) { r.shown = v; r.valueText.text = v; }
+                    if (r.buttons.activeSelf != host) r.buttons.SetActive(host);
+                }
+                if (hostNote.gameObject.activeSelf == host) { hostNote.gameObject.SetActive(!host); panelRect.sizeDelta = new Vector2(620f, host ? 330f : 360f); }
+
+                // ホストは2秒おきに全員へ送り直す (あとから入った人にも確実に届くように)
+                if (host && Time.unscaledTime > nextSync)
+                {
+                    nextSync = Time.unscaledTime + 2f;
+                    Plugin.SendSettingsToOthers();
+                }
+            }
+            catch (Exception e)
+            {
+                failed = true;
+                if (canvasGo != null) canvasGo.SetActive(false);
+                UnityEngine.Debug.LogError("[RoundsJPSettings] ロビーのルールパネルを停止: " + e);
+            }
+        }
+
+        private static void Changed()
+        {
+            Plugin.LoadLocalValues();
+            Plugin.SendSettingsToOthers();
+            UnreadyAll();
+        }
+
+        private static TMP_FontAsset LatinFont()
+        {
+            foreach (TMP_FontAsset f in Resources.FindObjectsOfTypeAll<TMP_FontAsset>())
+            {
+                try
+                {
+                    if (f != null && f.HasCharacter('A', true, false) && f.HasCharacter('<', true, false) && f.HasCharacter('0', true, false)) return f;
+                }
+                catch (Exception) { }
+            }
+            return null;
+        }
+
+        private static TextMeshProUGUI MakeText(Transform parent, string text, Vector2 pos, Vector2 size, float fontSize, TextAlignmentOptions align, TMP_FontAsset font)
+        {
+            GameObject go = new GameObject("Text", typeof(RectTransform));
+            go.transform.SetParent(parent, false);
+            RectTransform rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = new Vector2(0f, 1f);
+            rt.pivot = new Vector2(0f, 1f);
+            rt.anchoredPosition = pos;
+            rt.sizeDelta = size;
+            TextMeshProUGUI t = go.AddComponent<TextMeshProUGUI>();
+            if (font != null) t.font = font;
+            t.fontSize = fontSize;
+            t.alignment = align;
+            t.enableWordWrapping = false;
+            t.overflowMode = TextOverflowModes.Overflow;
+            t.color = Color.white;
+            t.raycastTarget = false;
+            t.richText = false; // "<" ">" をタグとして解釈させない
+            t.text = text;
+            return t;
+        }
+
+        private static void MakeButton(Transform parent, string label, Vector2 pos, TMP_FontAsset font, UnityEngine.Events.UnityAction onClick)
+        {
+            GameObject go = new GameObject("Button", typeof(RectTransform));
+            go.transform.SetParent(parent, false);
+            RectTransform rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = new Vector2(0f, 1f);
+            rt.pivot = new Vector2(0f, 1f);
+            rt.anchoredPosition = pos;
+            rt.sizeDelta = new Vector2(44f, 40f);
+            Image img = go.AddComponent<Image>();
+            img.color = new Color(1f, 1f, 1f, 0.15f);
+            Button b = go.AddComponent<Button>();
+            ColorBlock cb = b.colors;
+            cb.highlightedColor = new Color(1f, 0.6f, 0.1f, 1f);
+            cb.pressedColor = new Color(1f, 0.45f, 0f, 1f);
+            b.colors = cb;
+            b.onClick.AddListener(onClick);
+            TextMeshProUGUI t = MakeText(go.transform, label, Vector2.zero, new Vector2(44f, 40f), 30f, TextAlignmentOptions.Center, font);
+        }
+
+        private static void AddRow(Transform panel, TMP_FontAsset latin, string label, Func<string> value, Action<int> change)
+        {
+            float y = -70f - rows.Count * 50f;
+            Row r = new Row();
+            r.label = label;
+            r.value = value;
+            r.change = change;
+            TextMeshProUGUI lt = MakeText(panel, label, new Vector2(20f, y), new Vector2(400f, 40f), 26f, TextAlignmentOptions.MidlineLeft, latin);
+            lt.enableAutoSizing = true; // 長い訳語はボタンに重ならないよう縮める
+            lt.fontSizeMin = 16f;
+            lt.fontSizeMax = 26f;
+            lt.overflowMode = TextOverflowModes.Ellipsis;
+            r.valueText = MakeText(panel, "", new Vector2(475f, y), new Vector2(80f, 40f), 30f, TextAlignmentOptions.Center, latin);
+            r.buttons = new GameObject("Buttons", typeof(RectTransform));
+            r.buttons.transform.SetParent(panel, false);
+            RectTransform brt = r.buttons.GetComponent<RectTransform>();
+            brt.anchorMin = brt.anchorMax = new Vector2(0f, 1f);
+            brt.pivot = new Vector2(0f, 1f);
+            brt.anchoredPosition = Vector2.zero;
+            brt.sizeDelta = Vector2.zero;
+            MakeButton(r.buttons.transform, "<", new Vector2(430f, y), latin, delegate { r.change(-1); Changed(); });
+            MakeButton(r.buttons.transform, ">", new Vector2(555f, y), latin, delegate { r.change(+1); Changed(); });
+            rows.Add(r);
+        }
+
+        private static void Build()
+        {
+            TMP_FontAsset latin = LatinFont();
+
+            canvasGo = new GameObject("RoundsJPSettings_LobbyRules");
+            UnityEngine.Object.DontDestroyOnLoad(canvasGo);
+            Canvas canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = 500;
+            CanvasScaler scaler = canvasGo.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920f, 1080f);
+            scaler.matchWidthOrHeight = 0.5f;
+            canvasGo.AddComponent<GraphicRaycaster>();
+
+            GameObject panelGo = new GameObject("Panel", typeof(RectTransform));
+            panelGo.transform.SetParent(canvasGo.transform, false);
+            RectTransform prt = panelGo.GetComponent<RectTransform>();
+            prt.anchorMin = prt.anchorMax = new Vector2(1f, 1f);
+            prt.pivot = new Vector2(1f, 1f);
+            prt.anchoredPosition = new Vector2(-24f, -24f);
+            prt.sizeDelta = new Vector2(620f, 360f);
+            panelRect = prt;
+            Image bg = panelGo.AddComponent<Image>();
+            bg.color = new Color(0f, 0f, 0f, 0.6f);
+            bg.raycastTarget = false;
+            Transform panel = panelGo.transform;
+
+            MakeText(panel, "RULES", new Vector2(20f, -14f), new Vector2(300f, 46f), 34f, TextAlignmentOptions.MidlineLeft, latin);
+            hostNote = MakeText(panel, "Only the host can change these", new Vector2(20f, -318f), new Vector2(580f, 32f), 20f, TextAlignmentOptions.MidlineLeft, latin);
+
+            AddRow(panel, latin, "Cards to pick per round", delegate { return Plugin.picks.ToString(); },
+                delegate (int d) { Plugin.PicksConfig.Value = Mathf.Clamp(Plugin.PicksConfig.Value + d, 0, Plugin.MaxPicks); });
+            AddRow(panel, latin, "Cards to choose from", delegate { return Plugin.draws.ToString(); },
+                delegate (int d) { Plugin.DrawsConfig.Value = Mathf.Clamp(Plugin.DrawsConfig.Value + d, 1, Plugin.MaxDraws); });
+            AddRow(panel, latin, "Points to win a round", delegate { return Plugin.points.ToString(); },
+                delegate (int d) { Plugin.PointsConfig.Value = Mathf.Clamp(Plugin.PointsConfig.Value + d, 1, 10); });
+            AddRow(panel, latin, "Rounds to win the game", delegate { return Plugin.rounds.ToString(); },
+                delegate (int d) { Plugin.RoundsConfig.Value = Mathf.Clamp(Plugin.RoundsConfig.Value + d, 1, 20); });
+            AddRow(panel, latin, "Fixed starting sides", delegate { return Plugin.fixedSides ? "ON" : "OFF"; },
+                delegate (int d) { Plugin.FixedSidesConfig.Value = !Plugin.FixedSidesConfig.Value; });
+        }
+    }
+
+    // =====================================================================
     //  開始サイドの固定
     //  RWF は GeneralizedSpawnPositions.GetSpawnDictionary で毎ラウンドチーム順をシャッフルするので、
     //  どのチームが左右どちらから始まるかが毎回変わる。
@@ -309,7 +562,7 @@ namespace RoundsJPSettings
 
         private static void Postfix(Dictionary<Player, Vector2> __result)
         {
-            if (Plugin.FixedSidesConfig == null || !Plugin.FixedSidesConfig.Value || __result == null || __result.Count < 2)
+            if (!Plugin.fixedSides || __result == null || __result.Count < 2)
             {
                 return;
             }
@@ -839,7 +1092,11 @@ namespace RoundsJPSettings
             { "Points to win a round", "ラウンドを取るのに必要なポイント|ラウンド勝利のポイント数" },
             { "Rounds to win the game", "勝利に必要なラウンド数|勝利までのラウンド数" },
             { "Translate to Japanese", "英語表示を日本語にする|日本語で表示する" },
-            { "Fixed starting sides", "開始サイドを固定する|チームの左右を固定|チームの左右：ランダムをオフ" },
+            { "Fixed starting sides", "開始サイドを固定する|チームの左右を固定|毎ラウンド同じ左右から始める|チームの左右を入れかえない|左右を入れかえない|チームの左右：ランダムをオフ" },
+            { "RULES", "ゲーム設定|ルール" },
+            { "Only the host can change these", "ホストだけが変えられます|ホストのオプション" },
+            { "ON", "オン" },
+            { "OFF", "オフ" },
             // UnboundLib
             { "MODS", "MOD" },
             { "LOCAL", "ローカル" },
@@ -861,7 +1118,21 @@ namespace RoundsJPSettings
         private static readonly Regex waitingFor = new Regex(@"^WAITING FOR (.+)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex pointTo = new Regex(@"^POINT TO ?(TEAMS?)? ?(.*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex teamColor = new Regex(@"^TEAM (.+)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-        private static readonly Regex teamNumber = new Regex(@"^Team (\d+)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex keyHint = new Regex(@"^(.+?) TO (.+)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Dictionary<string, string> hintActions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "JOIN/READY", "参加 / 準備OK" },
+            { "SELECT FACE", "顔を選ぶ|フェイスを選ぶ" },
+            { "SELECT TEAM", "チームを選ぶ" },
+            { "INTERACT", "決定|OK" },
+            { "EXIT PLAYER MENU", "プレイヤーメニューを閉じる|プレイヤーメニューから戻る|戻る" },
+            { "EDIT", "編集" },
+        };
+        private static readonly Dictionary<string, string> hintKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "LEFT/RIGHT", "左右" },
+        };
+        private static readonly Regex teamNumber =new Regex(@"^Team (\d+)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static string Color(string name)
         {
@@ -902,6 +1173,21 @@ namespace RoundsJPSettings
                 }
                 return (m.Groups[1].Value.Length > 0 ? "チーム " : "") + Color(who) + " にポイント";
             }
+            // RWF の操作ヒント「[W/S] TO SELECT TEAM」→「[W/S]：チームを選ぶ」
+            m = keyHint.Match(trimmed);
+            if (m.Success)
+            {
+                string action;
+                if (hintActions.TryGetValue(m.Groups[2].Value.Trim(), out action))
+                {
+                    string key = m.Groups[1].Value.Trim();
+                    string keyJp;
+                    if (hintKeys.TryGetValue(key, out keyJp)) key = keyJp;
+                    List<string> outs = new List<string>();
+                    foreach (string a in action.Split('|')) outs.Add(key + "：" + a);
+                    return string.Join("|", outs.ToArray());
+                }
+            }
             m = teamNumber.Match(trimmed);
             if (m.Success)
             {
@@ -925,7 +1211,7 @@ namespace RoundsJPSettings
         //  - 日本語にした文字は、フォントをゲーム標準の日本語フォントに差し替えて見た目を揃える
         //  - 訳語にフォントにない字が混ざっていたら、□ にせず英語のまま出す
         //  - 起動直後はフォントがまだ読み込まれていないので、見つかるまで1秒おきに探し直す
-        private static TMP_FontAsset japaneseFont = null;
+        internal static TMP_FontAsset japaneseFont = null;
         private static float nextSearchTime = 0f;
         private static int searchCount = 0;
         private static readonly List<TMP_Text> pending = new List<TMP_Text>();
