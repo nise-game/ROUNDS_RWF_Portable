@@ -93,6 +93,8 @@ BepInEx\config\local.rounds.jpsettings.cfg を直接書き換えても OK です
     名前が1文字のカード（日本語の「毒」など）を取ると、ピックが終わらずにもう1枚選べてしまう。
     （取得カード一覧の略称を作るときに名前の2文字目が無くてエラーになっていたため）
 - メインメニューのボタン順を「ローカル・オンライン・オプション・MOD・クレジット・終了」に直しています。
+- UnboundLib が画面右下に出す Discord / Thunderstore のリンク（ただの案内で、Thunderstore は不要）を消しています。
+  出したいときは local.rounds.jpsettings.cfg の HideCommunityLinks = false にして再起動してください。
 - カードの取り方・候補の数の仕組みは Pick N Cards / Draw N Cards（Pykess）を参考にしています。
 
 RoundsJPSettings を作り直すとき（作った人向け）:

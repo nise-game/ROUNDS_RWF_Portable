@@ -58,6 +58,7 @@ namespace RoundsJPSettings
         internal static bool fixedSides = false;
 
         internal static ConfigEntry<bool> LobbyPanelConfig;
+        internal static ConfigEntry<bool> HideLinksConfig;
 
         private void Awake()
         {
@@ -70,6 +71,7 @@ namespace RoundsJPSettings
             FixedSidesConfig = Config.Bind("Game", "FixedSides", false, "毎ラウンドの開始サイドを固定する (チーム番号の小さい順に左から。RWF は標準ではランダム)");
             TranslateConfig = Config.Bind("Language", "TranslateToJapanese", true, "RWF / UnboundLib の英語表示を日本語にする");
             LobbyPanelConfig = Config.Bind("Lobby", "ShowRulesPanel", true, "ロビー (試合開始前) にルールパネルを出す。ホストはここで設定を変えられる");
+            HideLinksConfig = Config.Bind("Lobby", "HideCommunityLinks", true, "UnboundLib が画面右下に出す Discord / Thunderstore のリンクを消す (変更は再起動後に反映)");
 
             LoadLocalValues();
 
@@ -990,6 +992,31 @@ namespace RoundsJPSettings
             __instance.leftHandTarget.position += ___leftHandVel * dt;
             __instance.rightHandTarget.position += ___rightHandVel * dt;
             return false;
+        }
+    }
+
+    // =====================================================================
+    //  UnboundLib のコミュニティリンク (画面右下の Discord / Thunderstore) を出さない
+    //  メインメニューを開くたびに MainMenuLinks.AddLinks がリンクを作って表示するので、
+    //  それを止める。リンクは案内用で、mod の動作には関係しない。
+    // =====================================================================
+    [HarmonyPatch]
+    internal class MainMenuLinks_AddLinks_Patch
+    {
+        private static bool Prepare()
+        {
+            return TargetMethod() != null;
+        }
+
+        private static System.Reflection.MethodBase TargetMethod()
+        {
+            Type t = AccessTools.TypeByName("UnboundLib.Utils.UI.MainMenuLinks");
+            return t == null ? null : AccessTools.Method(t, "AddLinks");
+        }
+
+        private static bool Prefix()
+        {
+            return Plugin.HideLinksConfig == null || !Plugin.HideLinksConfig.Value;
         }
     }
 
